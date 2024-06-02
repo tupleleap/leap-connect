@@ -1,13 +1,11 @@
-# OpenAI API client library for Rust (unofficial)
-The OpenAI API client Rust library provides convenient access to the OpenAI API from Rust applications.
-
-Check out the [docs.rs](https://docs.rs/openai-api-rs/).
+# leap-connect API client library for Rust (unofficial)
+The leap-connect API client Rust library provides convenient access to the OpenAI API from Rust applications.
 
 ## Installation:
 Cargo.toml
 ```toml
 [dependencies]
-openai-api-rs = "4.0.9"
+leap-connect = "1.0.0"
 ```
 
 ## Usage
