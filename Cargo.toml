@@ -1,0 +1,24 @@
+[package]
+name = "leap-connect"
+version = "1.0.0"
+edition = "2021"
+authors = ["Ranganath.S <ranganaths@tupleleap.com>"]
+license = "MIT"
+description = "Leap-inference  API client library for Rust (unofficial)"
+repository = "https://github.com/tupleleap/leap-connect"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies.serde]
+version = "1"
+features = ["derive"]
+default-features = false
+
+[dependencies.serde_json]
+version = "1"
+default-features = false
+
+[dependencies.minreq]
+version = "2"
+default-features = false
+features = ["https-rustls", "json-using-serde", "proxy"]
