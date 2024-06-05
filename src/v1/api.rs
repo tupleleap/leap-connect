@@ -36,7 +36,9 @@ use crate::v1::run::{
 };
 use crate::v1::thread::{CreateThreadRequest, ModifyThreadRequest, ThreadObject};
 
-use minreq::Response;
+use reqwest::header::HeaderMap;
+use reqwest::RequestBuilder;
+use std::collections::HashMap;
 use std::fs::{create_dir_all, File};
 use std::io::Write;
 use std::path::Path;
@@ -48,6 +50,7 @@ pub struct Client {
     pub api_key: String,
     pub organization: Option<String>,
     pub proxy: Option<String>,
+    http_client: reqwest::Client,
 }
 
 impl Client {
@@ -62,307 +65,332 @@ impl Client {
             api_key,
             organization: None,
             proxy: None,
+            http_client: reqwest::Client::new(),
         }
     }
 
     pub fn new_with_organization(api_key: String, organization: String) -> Self {
         let endpoint = std::env::var("API_URL_V1").unwrap_or_else(|_| API_URL_V1.to_owned());
-        Self {
-            api_endpoint: endpoint,
-            api_key,
-            organization: organization.into(),
-            proxy: None,
-        }
+        let mut client = Self::new_with_endpoint(endpoint, api_key);
+        client.organization = organization.into();
+        return client;
     }
 
     pub fn new_with_proxy(api_key: String, proxy: String) -> Self {
-        let endpoint = std::env::var("API_URL_V1").unwrap_or_else(|_| API_URL_V1.to_owned());
+        let api_endpoint = std::env::var("API_URL_V1").unwrap_or_else(|_| API_URL_V1.to_owned());
+
         Self {
-            api_endpoint: endpoint,
+            api_endpoint,
             api_key,
             organization: None,
-            proxy: Some(proxy),
+            proxy: Some(proxy.clone()),
+            http_client: reqwest::Client::builder()
+                .proxy(reqwest::Proxy::all(proxy).expect("proxy format incorrect"))
+                .build()
+                .unwrap(),
         }
     }
 
-    pub fn build_request(&self, request: minreq::Request, is_beta: bool) -> minreq::Request {
-        let mut request = request
-            .with_header("Content-Type", "application/json")
-            .with_header("Authorization", format!("Bearer {}", self.api_key));
+    pub fn build_request(&self, req_builder: RequestBuilder, is_beta: bool) -> RequestBuilder {
+        let mut builder = req_builder
+            .header("Content-Type", "application/json")
+            .header("Authorization", format!("Bearer {}", self.api_key));
         if let Some(organization) = &self.organization {
-            request = request.with_header("tupleleapai-organization", organization);
+            builder = builder.header("tupleleapai-organization", organization);
         }
         if is_beta {
-            request = request.with_header("tupleleapai-Beta", "assistants=v1");
+            builder = builder.header("tupleleapai-Beta", "assistants=v1");
         }
-        if let Some(proxy) = &self.proxy {
-            request = request.with_proxy(minreq::Proxy::new(proxy).unwrap());
-        }
-        request
+        builder
     }
 
-    pub fn post<T: serde::ser::Serialize>(
+    pub async fn post<T: serde::ser::Serialize>(
         &self,
         path: &str,
         params: &T,
-    ) -> Result<Response, APIError> {
+    ) -> Result<reqwest::Response, APIError> {
         let url = format!(
             "{api_endpoint}{path}",
             api_endpoint = self.api_endpoint,
             path = path
         );
-        let request = self.build_request(minreq::post(url), Self::is_beta(path));
-        let res = request.with_json(params).unwrap().send();
+
+        let request = self.build_request(self.http_client.post(url), Self::is_beta(path));
+        let res = request.json(params).send().await;
         match res {
-            Ok(res) => {
-                if (200..=299).contains(&res.status_code) {
-                    Ok(res)
-                } else {
-                    Err(APIError {
-                        message: format!("{}: {}", res.status_code, res.as_str().unwrap()),
-                    })
-                }
-            }
-            Err(e) => Err(self.new_error(e)),
+            Ok(res) => res.error_for_status().map_err(|e| APIError {
+                message: format!("{}", e),
+            }),
+            Err(e) => Err(APIError {
+                message: format!("{}", e),
+            }),
         }
     }
 
-    pub fn get(&self, path: &str) -> Result<Response, APIError> {
+    pub async fn get(&self, path: &str) -> Result<reqwest::Response, APIError> {
         let url = format!(
             "{api_endpoint}{path}",
             api_endpoint = self.api_endpoint,
             path = path
         );
-        let request = self.build_request(minreq::get(url), Self::is_beta(path));
-        let res = request.send();
+        let request = self.build_request(self.http_client.get(url), Self::is_beta(path));
+        let res = request.send().await;
         match res {
-            Ok(res) => {
-                if (200..=299).contains(&res.status_code) {
-                    Ok(res)
-                } else {
-                    Err(APIError {
-                        message: format!("{}: {}", res.status_code, res.as_str().unwrap()),
-                    })
-                }
-            }
+            Ok(res) => res.error_for_status().map_err(|e| APIError {
+                message: format!("{}", e),
+            }),
             Err(e) => Err(self.new_error(e)),
         }
     }
 
-    pub fn delete(&self, path: &str) -> Result<Response, APIError> {
+    pub async fn delete(&self, path: &str) -> Result<reqwest::Response, APIError> {
         let url = format!(
             "{api_endpoint}{path}",
             api_endpoint = self.api_endpoint,
             path = path
         );
-        let request = self.build_request(minreq::delete(url), Self::is_beta(path));
-        let res = request.send();
+        let request = self.build_request(self.http_client.delete(url), Self::is_beta(path));
+        let res = request.send().await;
         match res {
-            Ok(res) => {
-                if (200..=299).contains(&res.status_code) {
-                    Ok(res)
-                } else {
-                    Err(APIError {
-                        message: format!("{}: {}", res.status_code, res.as_str().unwrap()),
-                    })
-                }
-            }
+            Ok(res) => res.error_for_status().map_err(|e| APIError {
+                message: format!("{}", e),
+            }),
             Err(e) => Err(self.new_error(e)),
         }
     }
 
-    pub fn completion(&self, req: CompletionRequest) -> Result<CompletionResponse, APIError> {
-        let res = self.post("/completions", &req)?;
-        let r = res.json::<CompletionResponse>();
+    pub async fn completion(&self, req: CompletionRequest) -> Result<CompletionResponse, APIError> {
+        let res = self.post("/completions", &req).await?;
+        let headers = res.headers().clone();
+        let r = res.json::<CompletionResponse>().await;
         match r {
             Ok(mut r) => {
-                r.headers = Some(res.headers);
+                r.headers = Some(Self::convert_to_map(headers));
                 Ok(r)
             }
             Err(e) => Err(self.new_error(e)),
         }
     }
 
-    pub fn edit(&self, req: EditRequest) -> Result<EditResponse, APIError> {
-        let res = self.post("/edits", &req)?;
-        let r = res.json::<EditResponse>();
+    fn convert_to_map(headers: HeaderMap) -> HashMap<String, String> {
+        headers
+            .into_iter()
+            .map(|(name, value)| {
+                (
+                    name.unwrap().to_string(),
+                    value.to_str().unwrap().to_owned(),
+                )
+            })
+            .collect()
+    }
+
+    pub async fn edit(&self, req: EditRequest) -> Result<EditResponse, APIError> {
+        let res = self.post("/edits", &req).await?;
+        let headers = res.headers().clone();
+        let r = res.json::<EditResponse>().await;
         match r {
             Ok(mut r) => {
-                r.headers = Some(res.headers);
+                r.headers = Some(Self::convert_to_map(headers));
                 Ok(r)
             }
             Err(e) => Err(self.new_error(e)),
         }
     }
 
-    pub fn image_generation(
+    pub async fn image_generation(
         &self,
         req: ImageGenerationRequest,
     ) -> Result<ImageGenerationResponse, APIError> {
-        let res = self.post("/images/generations", &req)?;
-        let r = res.json::<ImageGenerationResponse>();
+        let res = self.post("/images/generations", &req).await?;
+        let headers = res.headers().clone();
+        let r = res.json::<ImageGenerationResponse>().await;
         match r {
             Ok(mut r) => {
-                r.headers = Some(res.headers);
+                r.headers = Some(Self::convert_to_map(headers));
                 Ok(r)
             }
             Err(e) => Err(self.new_error(e)),
         }
     }
 
-    pub fn image_edit(&self, req: ImageEditRequest) -> Result<ImageEditResponse, APIError> {
-        let res = self.post("/images/edits", &req)?;
-        let r = res.json::<ImageEditResponse>();
+    pub async fn image_edit(&self, req: ImageEditRequest) -> Result<ImageEditResponse, APIError> {
+        let res = self.post("/images/edits", &req).await?;
+        let headers = res.headers().clone();
+        let r = res.json::<ImageEditResponse>().await;
         match r {
             Ok(mut r) => {
-                r.headers = Some(res.headers);
+                r.headers = Some(Self::convert_to_map(headers));
                 Ok(r)
             }
             Err(e) => Err(self.new_error(e)),
         }
     }
 
-    pub fn image_variation(
+    pub async fn image_variation(
         &self,
         req: ImageVariationRequest,
     ) -> Result<ImageVariationResponse, APIError> {
-        let res = self.post("/images/variations", &req)?;
-        let r = res.json::<ImageVariationResponse>();
+        let res = self.post("/images/variations", &req).await?;
+        let headers = res.headers().clone();
+        let r = res.json::<ImageVariationResponse>().await;
         match r {
             Ok(mut r) => {
-                r.headers = Some(res.headers);
+                r.headers = Some(Self::convert_to_map(headers));
                 Ok(r)
             }
             Err(e) => Err(self.new_error(e)),
         }
     }
 
-    pub fn embedding(&self, req: EmbeddingRequest) -> Result<EmbeddingResponse, APIError> {
-        let res = self.post("/embeddings", &req)?;
-        let r = res.json::<EmbeddingResponse>();
+    pub async fn embedding(&self, req: EmbeddingRequest) -> Result<EmbeddingResponse, APIError> {
+        let res = self.post("/embeddings", &req).await?;
+        let headers = res.headers().clone();
+        let r = res.json::<EmbeddingResponse>().await;
         match r {
             Ok(mut r) => {
-                r.headers = Some(res.headers);
+                r.headers = Some(Self::convert_to_map(headers));
                 Ok(r)
             }
             Err(e) => Err(self.new_error(e)),
         }
     }
 
-    pub fn file_list(&self) -> Result<FileListResponse, APIError> {
-        let res = self.get("/files")?;
-        let r = res.json::<FileListResponse>();
+    pub async fn file_list(&self) -> Result<FileListResponse, APIError> {
+        let res = self.get("/files").await?;
+        let headers = res.headers().clone();
+        let r = res.json::<FileListResponse>().await;
         match r {
             Ok(mut r) => {
-                r.headers = Some(res.headers);
+                r.headers = Some(Self::convert_to_map(headers));
                 Ok(r)
             }
             Err(e) => Err(self.new_error(e)),
         }
     }
 
-    pub fn file_upload(&self, req: FileUploadRequest) -> Result<FileUploadResponse, APIError> {
-        let res = self.post("/files", &req)?;
-        let r = res.json::<FileUploadResponse>();
+    pub async fn file_upload(
+        &self,
+        req: FileUploadRequest,
+    ) -> Result<FileUploadResponse, APIError> {
+        let res = self.post("/files", &req).await?;
+        let headers = res.headers().clone();
+        let r = res.json::<FileUploadResponse>().await;
         match r {
             Ok(mut r) => {
-                r.headers = Some(res.headers);
+                r.headers = Some(Self::convert_to_map(headers));
                 Ok(r)
             }
             Err(e) => Err(self.new_error(e)),
         }
     }
 
-    pub fn file_delete(&self, req: FileDeleteRequest) -> Result<FileDeleteResponse, APIError> {
-        let res = self.delete(&format!("{}/{}", "/files", req.file_id))?;
-        let r = res.json::<FileDeleteResponse>();
+    pub async fn file_delete(
+        &self,
+        req: FileDeleteRequest,
+    ) -> Result<FileDeleteResponse, APIError> {
+        let res = self
+            .delete(&format!("{}/{}", "/files", req.file_id))
+            .await?;
+        let headers = res.headers().clone();
+        let r = res.json::<FileDeleteResponse>().await;
         match r {
             Ok(mut r) => {
-                r.headers = Some(res.headers);
+                r.headers = Some(Self::convert_to_map(headers));
                 Ok(r)
             }
             Err(e) => Err(self.new_error(e)),
         }
     }
 
-    pub fn file_retrieve(
+    pub async fn file_retrieve(
         &self,
         req: FileRetrieveRequest,
     ) -> Result<FileRetrieveResponse, APIError> {
-        let res = self.get(&format!("{}/{}", "/files", req.file_id))?;
-        let r = res.json::<FileRetrieveResponse>();
+        let res = self.get(&format!("{}/{}", "/files", req.file_id)).await?;
+        let headers = res.headers().clone();
+        let r = res.json::<FileRetrieveResponse>().await;
         match r {
             Ok(mut r) => {
-                r.headers = Some(res.headers);
+                r.headers = Some(Self::convert_to_map(headers));
                 Ok(r)
             }
             Err(e) => Err(self.new_error(e)),
         }
     }
 
-    pub fn file_retrieve_content(
+    pub async fn file_retrieve_content(
         &self,
         req: FileRetrieveContentRequest,
     ) -> Result<FileRetrieveContentResponse, APIError> {
-        let res = self.get(&format!("{}/{}/content", "/files", req.file_id))?;
-        let r = res.json::<FileRetrieveContentResponse>();
+        let res = self
+            .get(&format!("{}/{}/content", "/files", req.file_id))
+            .await?;
+        let headers = res.headers().clone();
+        let r = res.json::<FileRetrieveContentResponse>().await;
         match r {
             Ok(mut r) => {
-                r.headers = Some(res.headers);
+                r.headers = Some(Self::convert_to_map(headers));
                 Ok(r)
             }
             Err(e) => Err(self.new_error(e)),
         }
     }
 
-    pub fn chat_completion(
+    pub async fn chat_completion(
         &self,
         req: ChatCompletionRequest,
     ) -> Result<ChatCompletionResponse, APIError> {
-        let res = self.post("/chat/completions", &req)?;
-        let r = res.json::<ChatCompletionResponse>();
+        let res = self.post("/chat/completions", &req).await?;
+        let headers = res.headers().clone();
+        let r = res.json::<ChatCompletionResponse>().await;
         match r {
             Ok(mut r) => {
-                r.headers = Some(res.headers);
+                r.headers = Some(Self::convert_to_map(headers));
                 Ok(r)
             }
             Err(e) => Err(self.new_error(e)),
         }
     }
 
-    pub fn audio_transcription(
+    pub async fn audio_transcription(
         &self,
         req: AudioTranscriptionRequest,
     ) -> Result<AudioTranscriptionResponse, APIError> {
-        let res = self.post("/audio/transcriptions", &req)?;
-        let r = res.json::<AudioTranscriptionResponse>();
+        let res = self.post("/audio/transcriptions", &req).await?;
+        let headers = res.headers().clone();
+        let r = res.json::<AudioTranscriptionResponse>().await;
         match r {
             Ok(mut r) => {
-                r.headers = Some(res.headers);
+                r.headers = Some(Self::convert_to_map(headers));
                 Ok(r)
             }
             Err(e) => Err(self.new_error(e)),
         }
     }
 
-    pub fn audio_translation(
+    pub async fn audio_translation(
         &self,
         req: AudioTranslationRequest,
     ) -> Result<AudioTranslationResponse, APIError> {
-        let res = self.post("/audio/translations", &req)?;
-        let r = res.json::<AudioTranslationResponse>();
+        let res = self.post("/audio/translations", &req).await?;
+        let headers = res.headers().clone();
+        let r = res.json::<AudioTranslationResponse>().await;
         match r {
             Ok(mut r) => {
-                r.headers = Some(res.headers);
+                r.headers = Some(Self::convert_to_map(headers));
                 Ok(r)
             }
             Err(e) => Err(self.new_error(e)),
         }
     }
 
-    pub fn audio_speech(&self, req: AudioSpeechRequest) -> Result<AudioSpeechResponse, APIError> {
-        let res = self.post("/audio/speech", &req)?;
-        let bytes = res.as_bytes();
+    pub async fn audio_speech(
+        &self,
+        req: AudioSpeechRequest,
+    ) -> Result<AudioSpeechResponse, APIError> {
+        let res = self.post("/audio/speech", &req).await?;
+        let headers = res.headers().clone();
+        let bytes = res.bytes().await.unwrap();
         let path = req.output.as_str();
         let path = Path::new(path);
         if let Some(parent) = path.parent() {
@@ -376,7 +404,7 @@ impl Client {
             }
         }
         match File::create(path) {
-            Ok(mut file) => match file.write_all(bytes) {
+            Ok(mut file) => match file.write_all(&bytes) {
                 Ok(_) => {}
                 Err(e) => {
                     return Err(APIError {
@@ -392,158 +420,186 @@ impl Client {
         }
         Ok(AudioSpeechResponse {
             result: true,
-            headers: Some(res.headers),
+            headers: Some(Self::convert_to_map(headers)),
         })
     }
 
-    pub fn create_fine_tuning_job(
+    pub async fn create_fine_tuning_job(
         &self,
         req: CreateFineTuningJobRequest,
     ) -> Result<FineTuningJobObject, APIError> {
-        let res = self.post("/fine_tuning/jobs", &req)?;
-        let r = res.json::<FineTuningJobObject>();
+        let res = self.post("/fine_tuning/jobs", &req).await?;
+        let headers = res.headers().clone();
+        let r = res.json::<FineTuningJobObject>().await;
         match r {
             Ok(mut r) => {
-                r.headers = Some(res.headers);
+                r.headers = Some(Self::convert_to_map(headers));
                 Ok(r)
             }
             Err(e) => Err(self.new_error(e)),
         }
     }
 
-    pub fn list_fine_tuning_jobs(
+    pub async fn list_fine_tuning_jobs(
         &self,
     ) -> Result<FineTuningPagination<FineTuningJobObject>, APIError> {
-        let res = self.get("/fine_tuning/jobs")?;
-        let r = res.json::<FineTuningPagination<FineTuningJobObject>>();
+        let res = self.get("/fine_tuning/jobs").await?;
+        let headers = res.headers().clone();
+        let r = res
+            .json::<FineTuningPagination<FineTuningJobObject>>()
+            .await;
         match r {
             Ok(mut r) => {
-                r.headers = Some(res.headers);
+                r.headers = Some(Self::convert_to_map(headers));
                 Ok(r)
             }
             Err(e) => Err(self.new_error(e)),
         }
     }
 
-    pub fn list_fine_tuning_job_events(
+    pub async fn list_fine_tuning_job_events(
         &self,
         req: ListFineTuningJobEventsRequest,
     ) -> Result<FineTuningPagination<FineTuningJobEvent>, APIError> {
-        let res = self.get(&format!(
-            "/fine_tuning/jobs/{}/events",
-            req.fine_tuning_job_id
-        ))?;
-        let r = res.json::<FineTuningPagination<FineTuningJobEvent>>();
+        let res = self
+            .get(&format!(
+                "/fine_tuning/jobs/{}/events",
+                req.fine_tuning_job_id
+            ))
+            .await?;
+        let headers = res.headers().clone();
+        let r = res.json::<FineTuningPagination<FineTuningJobEvent>>().await;
         match r {
             Ok(mut r) => {
-                r.headers = Some(res.headers);
+                r.headers = Some(Self::convert_to_map(headers));
                 Ok(r)
             }
             Err(e) => Err(self.new_error(e)),
         }
     }
 
-    pub fn retrieve_fine_tuning_job(
+    pub async fn retrieve_fine_tuning_job(
         &self,
         req: RetrieveFineTuningJobRequest,
     ) -> Result<FineTuningJobObject, APIError> {
-        let res = self.get(&format!("/fine_tuning/jobs/{}", req.fine_tuning_job_id))?;
-        let r = res.json::<FineTuningJobObject>();
+        let res = self
+            .get(&format!("/fine_tuning/jobs/{}", req.fine_tuning_job_id))
+            .await?;
+        let headers = res.headers().clone();
+        let r = res.json::<FineTuningJobObject>().await;
         match r {
             Ok(mut r) => {
-                r.headers = Some(res.headers);
+                r.headers = Some(Self::convert_to_map(headers));
                 Ok(r)
             }
             Err(e) => Err(self.new_error(e)),
         }
     }
 
-    pub fn cancel_fine_tuning_job(
+    pub async fn cancel_fine_tuning_job(
         &self,
         req: CancelFineTuningJobRequest,
     ) -> Result<FineTuningJobObject, APIError> {
-        let res = self.post(
-            &format!("/fine_tuning/jobs/{}/cancel", req.fine_tuning_job_id),
-            &req,
-        )?;
-        let r = res.json::<FineTuningJobObject>();
+        let res = self
+            .post(
+                &format!("/fine_tuning/jobs/{}/cancel", req.fine_tuning_job_id),
+                &req,
+            )
+            .await?;
+        let headers = res.headers().clone();
+        let r = res.json::<FineTuningJobObject>().await;
         match r {
             Ok(mut r) => {
-                r.headers = Some(res.headers);
+                r.headers = Some(Self::convert_to_map(headers));
                 Ok(r)
             }
             Err(e) => Err(self.new_error(e)),
         }
     }
 
-    pub fn create_moderation(
+    pub async fn create_moderation(
         &self,
         req: CreateModerationRequest,
     ) -> Result<CreateModerationResponse, APIError> {
-        let res = self.post("/moderations", &req)?;
-        let r = res.json::<CreateModerationResponse>();
+        let res = self.post("/moderations", &req).await?;
+        let headers = res.headers().clone();
+        let r = res.json::<CreateModerationResponse>().await;
         match r {
             Ok(mut r) => {
-                r.headers = Some(res.headers);
+                r.headers = Some(Self::convert_to_map(headers));
                 Ok(r)
             }
             Err(e) => Err(self.new_error(e)),
         }
     }
 
-    pub fn create_assistant(&self, req: AssistantRequest) -> Result<AssistantObject, APIError> {
-        let res = self.post("/assistants", &req)?;
-        let r = res.json::<AssistantObject>();
+    pub async fn create_assistant(
+        &self,
+        req: AssistantRequest,
+    ) -> Result<AssistantObject, APIError> {
+        let res = self.post("/assistants", &req).await?;
+        let headers = res.headers().clone();
+        let r = res.json::<AssistantObject>().await;
         match r {
             Ok(mut r) => {
-                r.headers = Some(res.headers);
+                r.headers = Some(Self::convert_to_map(headers));
                 Ok(r)
             }
             Err(e) => Err(self.new_error(e)),
         }
     }
 
-    pub fn retrieve_assistant(&self, assistant_id: String) -> Result<AssistantObject, APIError> {
-        let res = self.get(&format!("/assistants/{}", assistant_id))?;
-        let r = res.json::<AssistantObject>();
+    pub async fn retrieve_assistant(
+        &self,
+        assistant_id: String,
+    ) -> Result<AssistantObject, APIError> {
+        let res = self.get(&format!("/assistants/{}", assistant_id)).await?;
+        let headers = res.headers().clone();
+        let r = res.json::<AssistantObject>().await;
         match r {
             Ok(mut r) => {
-                r.headers = Some(res.headers);
+                r.headers = Some(Self::convert_to_map(headers));
                 Ok(r)
             }
             Err(e) => Err(self.new_error(e)),
         }
     }
 
-    pub fn modify_assistant(
+    pub async fn modify_assistant(
         &self,
         assistant_id: String,
         req: AssistantRequest,
     ) -> Result<AssistantObject, APIError> {
-        let res = self.post(&format!("/assistants/{}", assistant_id), &req)?;
-        let r = res.json::<AssistantObject>();
+        let res = self
+            .post(&format!("/assistants/{}", assistant_id), &req)
+            .await?;
+        let headers = res.headers().clone();
+        let r = res.json::<AssistantObject>().await;
         match r {
             Ok(mut r) => {
-                r.headers = Some(res.headers);
+                r.headers = Some(Self::convert_to_map(headers));
                 Ok(r)
             }
             Err(e) => Err(self.new_error(e)),
         }
     }
 
-    pub fn delete_assistant(&self, assistant_id: String) -> Result<DeletionStatus, APIError> {
-        let res = self.delete(&format!("/assistants/{}", assistant_id))?;
-        let r = res.json::<DeletionStatus>();
+    pub async fn delete_assistant(&self, assistant_id: String) -> Result<DeletionStatus, APIError> {
+        let res = self
+            .delete(&format!("/assistants/{}", assistant_id))
+            .await?;
+        let headers = res.headers().clone();
+        let r = res.json::<DeletionStatus>().await;
         match r {
             Ok(mut r) => {
-                r.headers = Some(res.headers);
+                r.headers = Some(Self::convert_to_map(headers));
                 Ok(r)
             }
             Err(e) => Err(self.new_error(e)),
         }
     }
 
-    pub fn list_assistant(
+    pub async fn list_assistant(
         &self,
         limit: Option<i64>,
         order: Option<String>,
@@ -552,66 +608,76 @@ impl Client {
     ) -> Result<ListAssistant, APIError> {
         let mut url = "/assistants".to_owned();
         url = Self::query_params(limit, order, after, before, url);
-        let res = self.get(&url)?;
-        let r = res.json::<ListAssistant>();
+        let res = self.get(&url).await?;
+        let headers = res.headers().clone();
+        let r = res.json::<ListAssistant>().await;
         match r {
             Ok(mut r) => {
-                r.headers = Some(res.headers);
+                r.headers = Some(Self::convert_to_map(headers));
                 Ok(r)
             }
             Err(e) => Err(self.new_error(e)),
         }
     }
 
-    pub fn create_assistant_file(
+    pub async fn create_assistant_file(
         &self,
         assistant_id: String,
         req: AssistantFileRequest,
     ) -> Result<AssistantFileObject, APIError> {
-        let res = self.post(&format!("/assistants/{}/files", assistant_id), &req)?;
-        let r = res.json::<AssistantFileObject>();
+        let res = self
+            .post(&format!("/assistants/{}/files", assistant_id), &req)
+            .await?;
+        let headers = res.headers().clone();
+        let r = res.json::<AssistantFileObject>().await;
         match r {
             Ok(mut r) => {
-                r.headers = Some(res.headers);
+                r.headers = Some(Self::convert_to_map(headers));
                 Ok(r)
             }
             Err(e) => Err(self.new_error(e)),
         }
     }
 
-    pub fn retrieve_assistant_file(
+    pub async fn retrieve_assistant_file(
         &self,
         assistant_id: String,
         file_id: String,
     ) -> Result<AssistantFileObject, APIError> {
-        let res = self.get(&format!("/assistants/{}/files/{}", assistant_id, file_id))?;
-        let r = res.json::<AssistantFileObject>();
+        let res = self
+            .get(&format!("/assistants/{}/files/{}", assistant_id, file_id))
+            .await?;
+        let headers = res.headers().clone();
+        let r = res.json::<AssistantFileObject>().await;
         match r {
             Ok(mut r) => {
-                r.headers = Some(res.headers);
+                r.headers = Some(Self::convert_to_map(headers));
                 Ok(r)
             }
             Err(e) => Err(self.new_error(e)),
         }
     }
 
-    pub fn delete_assistant_file(
+    pub async fn delete_assistant_file(
         &self,
         assistant_id: String,
         file_id: String,
     ) -> Result<DeletionStatus, APIError> {
-        let res = self.delete(&format!("/assistants/{}/files/{}", assistant_id, file_id))?;
-        let r = res.json::<DeletionStatus>();
+        let res = self
+            .delete(&format!("/assistants/{}/files/{}", assistant_id, file_id))
+            .await?;
+        let headers = res.headers().clone();
+        let r = res.json::<DeletionStatus>().await;
         match r {
             Ok(mut r) => {
-                r.headers = Some(res.headers);
+                r.headers = Some(Self::convert_to_map(headers));
                 Ok(r)
             }
             Err(e) => Err(self.new_error(e)),
         }
     }
 
-    pub fn list_assistant_file(
+    pub async fn list_assistant_file(
         &self,
         assistant_id: String,
         limit: Option<i64>,
@@ -621,154 +687,174 @@ impl Client {
     ) -> Result<ListAssistantFile, APIError> {
         let mut url = format!("/assistants/{}/files", assistant_id);
         url = Self::query_params(limit, order, after, before, url);
-        let res = self.get(&url)?;
-        let r = res.json::<ListAssistantFile>();
+        let res = self.get(&url).await?;
+        let headers = res.headers().clone();
+        let r = res.json::<ListAssistantFile>().await;
         match r {
             Ok(mut r) => {
-                r.headers = Some(res.headers);
+                r.headers = Some(Self::convert_to_map(headers));
                 Ok(r)
             }
             Err(e) => Err(self.new_error(e)),
         }
     }
 
-    pub fn create_thread(&self, req: CreateThreadRequest) -> Result<ThreadObject, APIError> {
-        let res = self.post("/threads", &req)?;
-        let r = res.json::<ThreadObject>();
+    pub async fn create_thread(&self, req: CreateThreadRequest) -> Result<ThreadObject, APIError> {
+        let res = self.post("/threads", &req).await?;
+        let headers = res.headers().clone();
+        let r = res.json::<ThreadObject>().await;
         match r {
             Ok(mut r) => {
-                r.headers = Some(res.headers);
+                r.headers = Some(Self::convert_to_map(headers));
                 Ok(r)
             }
             Err(e) => Err(self.new_error(e)),
         }
     }
 
-    pub fn retrieve_thread(&self, thread_id: String) -> Result<ThreadObject, APIError> {
-        let res = self.get(&format!("/threads/{}", thread_id))?;
-        let r = res.json::<ThreadObject>();
+    pub async fn retrieve_thread(&self, thread_id: String) -> Result<ThreadObject, APIError> {
+        let res = self.get(&format!("/threads/{}", thread_id)).await?;
+        let headers = res.headers().clone();
+        let r = res.json::<ThreadObject>().await;
         match r {
             Ok(mut r) => {
-                r.headers = Some(res.headers);
+                r.headers = Some(Self::convert_to_map(headers));
                 Ok(r)
             }
             Err(e) => Err(self.new_error(e)),
         }
     }
 
-    pub fn modify_thread(
+    pub async fn modify_thread(
         &self,
         thread_id: String,
         req: ModifyThreadRequest,
     ) -> Result<ThreadObject, APIError> {
-        let res = self.post(&format!("/threads/{}", thread_id), &req)?;
-        let r = res.json::<ThreadObject>();
+        let res = self.post(&format!("/threads/{}", thread_id), &req).await?;
+        let headers = res.headers().clone();
+        let r = res.json::<ThreadObject>().await;
         match r {
             Ok(mut r) => {
-                r.headers = Some(res.headers);
+                r.headers = Some(Self::convert_to_map(headers));
                 Ok(r)
             }
             Err(e) => Err(self.new_error(e)),
         }
     }
 
-    pub fn delete_thread(&self, thread_id: String) -> Result<DeletionStatus, APIError> {
-        let res = self.delete(&format!("/threads/{}", thread_id))?;
-        let r = res.json::<DeletionStatus>();
+    pub async fn delete_thread(&self, thread_id: String) -> Result<DeletionStatus, APIError> {
+        let res = self.delete(&format!("/threads/{}", thread_id)).await?;
+        let headers = res.headers().clone();
+        let r = res.json::<DeletionStatus>().await;
         match r {
             Ok(mut r) => {
-                r.headers = Some(res.headers);
+                r.headers = Some(Self::convert_to_map(headers));
                 Ok(r)
             }
             Err(e) => Err(self.new_error(e)),
         }
     }
 
-    pub fn create_message(
+    pub async fn create_message(
         &self,
         thread_id: String,
         req: CreateMessageRequest,
     ) -> Result<MessageObject, APIError> {
-        let res = self.post(&format!("/threads/{}/messages", thread_id), &req)?;
-        let r = res.json::<MessageObject>();
+        let res = self
+            .post(&format!("/threads/{}/messages", thread_id), &req)
+            .await?;
+        let headers = res.headers().clone();
+        let r = res.json::<MessageObject>().await;
         match r {
             Ok(mut r) => {
-                r.headers = Some(res.headers);
+                r.headers = Some(Self::convert_to_map(headers));
                 Ok(r)
             }
             Err(e) => Err(self.new_error(e)),
         }
     }
 
-    pub fn retrieve_message(
+    pub async fn retrieve_message(
         &self,
         thread_id: String,
         message_id: String,
     ) -> Result<MessageObject, APIError> {
-        let res = self.get(&format!("/threads/{}/messages/{}", thread_id, message_id))?;
-        let r = res.json::<MessageObject>();
+        let res = self
+            .get(&format!("/threads/{}/messages/{}", thread_id, message_id))
+            .await?;
+        let headers = res.headers().clone();
+        let r = res.json::<MessageObject>().await;
         match r {
             Ok(mut r) => {
-                r.headers = Some(res.headers);
+                r.headers = Some(Self::convert_to_map(headers));
                 Ok(r)
             }
             Err(e) => Err(self.new_error(e)),
         }
     }
 
-    pub fn modify_message(
+    pub async fn modify_message(
         &self,
         thread_id: String,
         message_id: String,
         req: ModifyMessageRequest,
     ) -> Result<MessageObject, APIError> {
-        let res = self.post(
-            &format!("/threads/{}/messages/{}", thread_id, message_id),
-            &req,
-        )?;
-        let r = res.json::<MessageObject>();
+        let res = self
+            .post(
+                &format!("/threads/{}/messages/{}", thread_id, message_id),
+                &req,
+            )
+            .await?;
+        let headers = res.headers().clone();
+        let r = res.json::<MessageObject>().await;
         match r {
             Ok(mut r) => {
-                r.headers = Some(res.headers);
+                r.headers = Some(Self::convert_to_map(headers));
                 Ok(r)
             }
             Err(e) => Err(self.new_error(e)),
         }
     }
 
-    pub fn list_messages(&self, thread_id: String) -> Result<ListMessage, APIError> {
-        let res = self.get(&format!("/threads/{}/messages", thread_id))?;
-        let r = res.json::<ListMessage>();
+    pub async fn list_messages(&self, thread_id: String) -> Result<ListMessage, APIError> {
+        let res = self
+            .get(&format!("/threads/{}/messages", thread_id))
+            .await?;
+        let headers = res.headers().clone();
+        let r = res.json::<ListMessage>().await;
         match r {
             Ok(mut r) => {
-                r.headers = Some(res.headers);
+                r.headers = Some(Self::convert_to_map(headers));
                 Ok(r)
             }
             Err(e) => Err(self.new_error(e)),
         }
     }
 
-    pub fn retrieve_message_file(
+    pub async fn retrieve_message_file(
         &self,
         thread_id: String,
         message_id: String,
         file_id: String,
     ) -> Result<MessageFileObject, APIError> {
-        let res = self.get(&format!(
-            "/threads/{}/messages/{}/files/{}",
-            thread_id, message_id, file_id
-        ))?;
-        let r = res.json::<MessageFileObject>();
+        let res = self
+            .get(&format!(
+                "/threads/{}/messages/{}/files/{}",
+                thread_id, message_id, file_id
+            ))
+            .await?;
+        let headers = res.headers().clone();
+        let r = res.json::<MessageFileObject>().await;
         match r {
             Ok(mut r) => {
-                r.headers = Some(res.headers);
+                r.headers = Some(Self::convert_to_map(headers));
                 Ok(r)
             }
             Err(e) => Err(self.new_error(e)),
         }
     }
 
-    pub fn list_message_file(
+    pub async fn list_message_file(
         &self,
         thread_id: String,
         message_id: String,
@@ -779,63 +865,77 @@ impl Client {
     ) -> Result<ListMessageFile, APIError> {
         let mut url = format!("/threads/{}/messages/{}/files", thread_id, message_id);
         url = Self::query_params(limit, order, after, before, url);
-        let res = self.get(&url)?;
-        let r = res.json::<ListMessageFile>();
+        let res = self.get(&url).await?;
+        let headers = res.headers().clone();
+        let r = res.json::<ListMessageFile>().await;
         match r {
             Ok(mut r) => {
-                r.headers = Some(res.headers);
+                r.headers = Some(Self::convert_to_map(headers));
                 Ok(r)
             }
             Err(e) => Err(self.new_error(e)),
         }
     }
 
-    pub fn create_run(
+    pub async fn create_run(
         &self,
         thread_id: String,
         req: CreateRunRequest,
     ) -> Result<RunObject, APIError> {
-        let res = self.post(&format!("/threads/{}/runs", thread_id), &req)?;
-        let r = res.json::<RunObject>();
+        let res = self
+            .post(&format!("/threads/{}/runs", thread_id), &req)
+            .await?;
+        let headers = res.headers().clone();
+        let r = res.json::<RunObject>().await;
         match r {
             Ok(mut r) => {
-                r.headers = Some(res.headers);
+                r.headers = Some(Self::convert_to_map(headers));
                 Ok(r)
             }
             Err(e) => Err(self.new_error(e)),
         }
     }
 
-    pub fn retrieve_run(&self, thread_id: String, run_id: String) -> Result<RunObject, APIError> {
-        let res = self.get(&format!("/threads/{}/runs/{}", thread_id, run_id))?;
-        let r = res.json::<RunObject>();
+    pub async fn retrieve_run(
+        &self,
+        thread_id: String,
+        run_id: String,
+    ) -> Result<RunObject, APIError> {
+        let res = self
+            .get(&format!("/threads/{}/runs/{}", thread_id, run_id))
+            .await?;
+        let headers = res.headers().clone();
+        let r = res.json::<RunObject>().await;
         match r {
             Ok(mut r) => {
-                r.headers = Some(res.headers);
+                r.headers = Some(Self::convert_to_map(headers));
                 Ok(r)
             }
             Err(e) => Err(self.new_error(e)),
         }
     }
 
-    pub fn modify_run(
+    pub async fn modify_run(
         &self,
         thread_id: String,
         run_id: String,
         req: ModifyRunRequest,
     ) -> Result<RunObject, APIError> {
-        let res = self.post(&format!("/threads/{}/runs/{}", thread_id, run_id), &req)?;
-        let r = res.json::<RunObject>();
+        let res = self
+            .post(&format!("/threads/{}/runs/{}", thread_id, run_id), &req)
+            .await?;
+        let headers = res.headers().clone();
+        let r = res.json::<RunObject>().await;
         match r {
             Ok(mut r) => {
-                r.headers = Some(res.headers);
+                r.headers = Some(Self::convert_to_map(headers));
                 Ok(r)
             }
             Err(e) => Err(self.new_error(e)),
         }
     }
 
-    pub fn list_run(
+    pub async fn list_run(
         &self,
         thread_id: String,
         limit: Option<i64>,
@@ -845,69 +945,81 @@ impl Client {
     ) -> Result<ListRun, APIError> {
         let mut url = format!("/threads/{}/runs", thread_id);
         url = Self::query_params(limit, order, after, before, url);
-        let res = self.get(&url)?;
-        let r = res.json::<ListRun>();
+        let res = self.get(&url).await?;
+        let headers = res.headers().clone();
+        let r = res.json::<ListRun>().await;
         match r {
             Ok(mut r) => {
-                r.headers = Some(res.headers);
+                r.headers = Some(Self::convert_to_map(headers));
                 Ok(r)
             }
             Err(e) => Err(self.new_error(e)),
         }
     }
 
-    pub fn cancel_run(&self, thread_id: String, run_id: String) -> Result<RunObject, APIError> {
+    pub async fn cancel_run(
+        &self,
+        thread_id: String,
+        run_id: String,
+    ) -> Result<RunObject, APIError> {
         let empty_req = ModifyRunRequest::new();
-        let res = self.post(
-            &format!("/threads/{}/runs/{}/cancel", thread_id, run_id),
-            &empty_req,
-        )?;
-        let r = res.json::<RunObject>();
+        let res = self
+            .post(
+                &format!("/threads/{}/runs/{}/cancel", thread_id, run_id),
+                &empty_req,
+            )
+            .await?;
+        let headers = res.headers().clone();
+        let r = res.json::<RunObject>().await;
         match r {
             Ok(mut r) => {
-                r.headers = Some(res.headers);
+                r.headers = Some(Self::convert_to_map(headers));
                 Ok(r)
             }
             Err(e) => Err(self.new_error(e)),
         }
     }
 
-    pub fn create_thread_and_run(
+    pub async fn create_thread_and_run(
         &self,
         req: CreateThreadAndRunRequest,
     ) -> Result<RunObject, APIError> {
-        let res = self.post("/threads/runs", &req)?;
-        let r = res.json::<RunObject>();
+        let res = self.post("/threads/runs", &req).await?;
+        let headers = res.headers().clone();
+        let r = res.json::<RunObject>().await;
         match r {
             Ok(mut r) => {
-                r.headers = Some(res.headers);
+                r.headers = Some(Self::convert_to_map(headers));
                 Ok(r)
             }
             Err(e) => Err(self.new_error(e)),
         }
     }
 
-    pub fn retrieve_run_step(
+    pub async fn retrieve_run_step(
         &self,
         thread_id: String,
         run_id: String,
         step_id: String,
     ) -> Result<RunStepObject, APIError> {
-        let res = self.get(&format!(
-            "/threads/{}/runs/{}/steps/{}",
-            thread_id, run_id, step_id
-        ))?;
-        let r = res.json::<RunStepObject>();
+        let res = self
+            .get(&format!(
+                "/threads/{}/runs/{}/steps/{}",
+                thread_id, run_id, step_id
+            ))
+            .await?;
+        let headers = res.headers().clone();
+        let r = res.json::<RunStepObject>().await;
         match r {
             Ok(mut r) => {
-                r.headers = Some(res.headers);
+                r.headers = Some(Self::convert_to_map(headers));
                 Ok(r)
             }
             Err(e) => Err(self.new_error(e)),
         }
     }
 
-    pub fn list_run_step(
+    pub async fn list_run_step(
         &self,
         thread_id: String,
         run_id: String,
@@ -918,18 +1030,19 @@ impl Client {
     ) -> Result<ListRunStep, APIError> {
         let mut url = format!("/threads/{}/runs/{}/steps", thread_id, run_id);
         url = Self::query_params(limit, order, after, before, url);
-        let res = self.get(&url)?;
-        let r = res.json::<ListRunStep>();
+        let res = self.get(&url).await?;
+        let headers = res.headers().clone();
+        let r = res.json::<ListRunStep>().await;
         match r {
             Ok(mut r) => {
-                r.headers = Some(res.headers);
+                r.headers = Some(Self::convert_to_map(headers));
                 Ok(r)
             }
             Err(e) => Err(self.new_error(e)),
         }
     }
 
-    fn new_error(&self, err: minreq::Error) -> APIError {
+    fn new_error(&self, err: reqwest::Error) -> APIError {
         APIError {
             message: err.to_string(),
         }

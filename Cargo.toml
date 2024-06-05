@@ -8,6 +8,8 @@ description = "Leap-inference  API client library for Rust (unofficial)"
 repository = "https://github.com/tupleleap/leap-connect"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[env]
+TUPLELEAP_AI_API_KEY = "sk-xxxxxxx"
 
 [dependencies.serde]
 version = "1"
@@ -18,7 +20,6 @@ default-features = false
 version = "1"
 default-features = false
 
-[dependencies.minreq]
-version = "2"
-default-features = false
-features = ["https-rustls", "json-using-serde", "proxy"]
+[dependencies]
+reqwest = { version = "0.12", features = ["json"] }
+tokio = { version = "1", features = ["full"] }
