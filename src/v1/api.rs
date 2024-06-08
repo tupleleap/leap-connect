@@ -45,6 +45,7 @@ use std::path::Path;
 
 const API_URL_V1: &str = "http://0.0.0.0:1234/v1";
 
+#[derive(Clone)]
 pub struct Client {
     pub api_endpoint: String,
     pub api_key: String,
