@@ -2,6 +2,18 @@ use leap_connect::v1::api::Client;
 use leap_connect::v1::chat_completion::{self, ChatCompletionRequest};
 use leap_connect::v1::common::MISTRAL;
 use std::env;
+
+/*
+Add the following in settings.json file to run in vscode env
+ "rust-analyzer.runnables.extraEnv": {
+       "RUST_LOG": "debug",
+       "TUPLELEAP_AI_API_KEY": "sk-xxxxxxx",
+   },
+   "rust-analyzer.cargo.extraEnv": {
+       "RUST_LOG": "debug",
+       "TUPLELEAP_AI_API_KEY": "sk-xxxxxxx",
+   },
+*/
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("==starting");
