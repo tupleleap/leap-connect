@@ -461,7 +461,7 @@ impl Client {
                             let new_reader = StreamReader::new(reader.into_inner());
                             return Some((read_result.unwrap(), new_reader));
                         } else {
-                            // Do nothing skip and read the next line.
+                            // Do nothing, skip and read the next line.
                             // println!("Invalid data observed while trying to read the chunk, read the next chunk")
                         }
                     }
