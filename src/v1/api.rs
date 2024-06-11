@@ -392,23 +392,19 @@ impl Client {
         }
     }
 
-    // fn response_to_async_read(resp: reqwest::Response) -> impl tokio::io::AsyncRead {
-    //     let stream = resp.bytes_stream().map_err(std::io::Error::other);
-    //     tokio_util::io::StreamReader::new(stream)
-    // }
-
     fn read_chunk(line: String) -> Result<ChatChunkResponse, APIError> {
         let ser_data: &str = line.trim();
         if ser_data.is_empty() || ser_data.starts_with("data:") {
             match ser_data.splitn(2, "data:").last() {
                 Some(msg) => {
-                    let t3: Result<ChatChunkResponse, APIError> = match serde_json::from_str(msg) {
-                        Ok(chunk) => Ok(chunk),
-                        Err(e) => Err(APIError {
-                            message: e.to_string(),
-                        }),
-                    };
-                    return t3;
+                    let chunk_response: Result<ChatChunkResponse, APIError> =
+                        match serde_json::from_str(msg) {
+                            Ok(chunk) => Ok(chunk),
+                            Err(e) => Err(APIError {
+                                message: e.to_string(),
+                            }),
+                        };
+                    return chunk_response;
                 }
                 None => Err(APIError {
                     message: "invalid string, ignoring it".into(),
