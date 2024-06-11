@@ -36,12 +36,17 @@ use crate::v1::run::{
 };
 use crate::v1::thread::{CreateThreadRequest, ModifyThreadRequest, ThreadObject};
 
+use ::futures::{stream, Stream, TryStreamExt};
 use reqwest::header::HeaderMap;
 use reqwest::RequestBuilder;
 use std::collections::HashMap;
 use std::fs::{create_dir_all, File};
 use std::io::Write;
 use std::path::Path;
+use tokio::io::AsyncBufReadExt;
+use tokio_util::io::StreamReader;
+
+use super::chat_completion::ChatChunkResponse;
 
 const API_URL_V1: &str = "http://0.0.0.0:1234/v1";
 
@@ -105,6 +110,17 @@ impl Client {
         builder
     }
 
+    pub fn build_request_stream(
+        &self,
+        req_builder: RequestBuilder,
+        is_beta: bool,
+    ) -> RequestBuilder {
+        let builder = self
+            .build_request(req_builder, is_beta)
+            .header("Accept", "text/event-stream");
+        builder
+    }
+
     pub async fn post<T: serde::ser::Serialize>(
         &self,
         path: &str,
@@ -117,6 +133,29 @@ impl Client {
         );
 
         let request = self.build_request(self.http_client.post(url), Self::is_beta(path));
+        let res = request.json(params).send().await;
+        match res {
+            Ok(res) => res.error_for_status().map_err(|e| APIError {
+                message: format!("{}", e),
+            }),
+            Err(e) => Err(APIError {
+                message: format!("{}", e),
+            }),
+        }
+    }
+
+    pub async fn post_stream<T: serde::ser::Serialize>(
+        &self,
+        path: &str,
+        params: &T,
+    ) -> Result<reqwest::Response, APIError> {
+        let url = format!(
+            "{api_endpoint}{path}",
+            api_endpoint = self.api_endpoint,
+            path = path
+        );
+
+        let request = self.build_request_stream(self.http_client.post(url), Self::is_beta(path));
         let res = request.json(params).send().await;
         match res {
             Ok(res) => res.error_for_status().map_err(|e| APIError {
@@ -351,6 +390,89 @@ impl Client {
             }
             Err(e) => Err(self.new_error(e)),
         }
+    }
+
+    // fn response_to_async_read(resp: reqwest::Response) -> impl tokio::io::AsyncRead {
+    //     let stream = resp.bytes_stream().map_err(std::io::Error::other);
+    //     tokio_util::io::StreamReader::new(stream)
+    // }
+
+    fn read_chunk(line: String) -> Result<ChatChunkResponse, APIError> {
+        let ser_data: &str = line.trim();
+        if ser_data.is_empty() || ser_data.starts_with("data:") {
+            match ser_data.splitn(2, "data:").last() {
+                Some(msg) => {
+                    let t3: Result<ChatChunkResponse, APIError> = match serde_json::from_str(msg) {
+                        Ok(chunk) => Ok(chunk),
+                        Err(e) => Err(APIError {
+                            message: e.to_string(),
+                        }),
+                    };
+                    return t3;
+                }
+                None => Err(APIError {
+                    message: "invalid string, ignoring it".into(),
+                }),
+            }
+        } else {
+            Err(APIError {
+                message: "invalid string, ignoring it".into(),
+            })
+        }
+    }
+
+    pub async fn chat_completion_stream(
+        &self,
+        req: ChatCompletionRequest,
+    ) -> Result<impl Stream<Item = ChatChunkResponse>, APIError> {
+        let res = self
+            .post_stream("/chat/completions", &(req.stream(true)))
+            .await?;
+        if !res.status().is_success() {
+            return Err(APIError {
+                message: res.text().await.unwrap_or_else(|e| e.to_string()),
+            });
+        }
+        // Obtain a byte stream from the response.
+        let bytes_stream = res.bytes_stream().map_err(std::io::Error::other);
+        //Convert a [Stream] of byte chunks into an [AsyncRead].
+        let reader = StreamReader::new(bytes_stream);
+        // This creates a stream with closure returning a future.
+        let stream = stream::unfold(reader, |mut reader| async move {
+            loop {
+                let mut line_data = String::new();
+                // Read line from the underlying stream.
+                let line_result: Result<usize, std::io::Error> =
+                    reader.read_line(&mut line_data).await;
+
+                if line_result.is_err() {
+                    println!(
+                        "Error observed while erading from response {:?}",
+                        line_result.err()
+                    );
+                    return None;
+                } else {
+                    if line_result.unwrap() == 0 {
+                        // Nothing to read, end the stream.
+                        return None;
+                    } else {
+                        let msg = line_data;
+                        // parse the data and return a ChatChunkResponse.
+                        let read_result = Self::read_chunk(msg.clone());
+                        if read_result.is_ok() {
+                            // println!("Read line {}", msg);
+                            // Create a new object due to ownership issue, also the clone method is not implemented in the tokio lib
+                            let new_reader = StreamReader::new(reader.into_inner());
+                            return Some((read_result.unwrap(), new_reader));
+                        } else {
+                            // Do nothing skip and read the next line.
+                            // println!("Invalid data observed while trying to read the chunk, read the next chunk")
+                        }
+                    }
+                }
+            }
+        });
+        return Ok(stream);
     }
 
     pub async fn audio_transcription(
