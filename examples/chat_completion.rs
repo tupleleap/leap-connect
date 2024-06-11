@@ -1,3 +1,4 @@
+use futures::StreamExt;
 use leap_connect::v1::api::Client;
 use leap_connect::v1::chat_completion::{self, ChatCompletionRequest};
 use leap_connect::v1::common::MISTRAL;
@@ -16,13 +17,8 @@ Add the following in settings.json file to run in vscode env
 */
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("==starting");
-    println!(
-        "=={}",
-        env::var("TUPLELEAP_AI_API_KEY").unwrap().to_string()
-    );
+    println!("{}", env::var("TUPLELEAP_AI_API_KEY").unwrap().to_string());
     let client = Client::new(env::var("TUPLELEAP_AI_API_KEY").unwrap().to_string());
-    println!("==client created");
     let req = ChatCompletionRequest::new(
         MISTRAL.to_string(),
         vec![chat_completion::ChatCompletionMessage {
@@ -32,10 +28,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }],
     );
 
-    let result = client.chat_completion(req).await?;
-    println!("==Content: {:?}", result.choices[0].message.content);
-    println!("==Response Headers: {:?}", result.headers);
-
+    let result_stream = client.chat_completion_stream(req).await?;
+    let list: Vec<chat_completion::ChatChunkResponse> = result_stream.collect().await;
+    for resp in list {
+        for choice in resp.choices.iter() {
+            let data = &choice.delta.content;
+            if data.is_some() {
+                print!("{}", data.clone().unwrap())
+            }
+        }
+    }
     Ok(())
 }
 

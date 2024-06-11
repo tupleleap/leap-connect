@@ -159,11 +159,25 @@ pub struct ChatCompletionMessageForResponse {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+pub struct ChatChunkMessageForResponse {
+    pub role: MessageRole,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
 pub struct ChatCompletionChoice {
     pub index: i64,
     pub message: ChatCompletionMessageForResponse,
     pub finish_reason: Option<FinishReason>,
     pub finish_details: Option<FinishDetails>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct ChatChunkCompletionChoice {
+    pub index: i64,
+    pub delta: ChatChunkMessageForResponse,
+    pub finish_reason: Option<FinishReason>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -176,6 +190,16 @@ pub struct ChatCompletionResponse {
     pub usage: common::Usage,
     pub system_fingerprint: Option<String>,
     pub headers: Option<HashMap<String, String>>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct ChatChunkResponse {
+    pub id: String,
+    pub object: String,
+    pub created: i64,
+    pub model: String,
+    pub choices: Vec<ChatChunkCompletionChoice>,
+    pub system_fingerprint: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
